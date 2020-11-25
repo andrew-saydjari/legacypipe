@@ -413,7 +413,7 @@ def get_dependency_versions(unwise_dir, unwise_tr_dir, unwise_modelsky_dir, gale
     import matplotlib
     try:
         import mkl_fft
-    except:
+    except ImportError:
         mkl_fft = None
     import photutils
     import tractor
@@ -695,13 +695,13 @@ def imsave_jpeg(jpegfn, img, **kwargs):
     *jpegfn*: JPEG filename
     *img*: image, in the typical matplotlib formats (see plt.imsave)
     '''
-    import pylab as plt
+    from matplotlib.pyplot import imsave
     if True:
         kwargs.update(format='jpg')
-        plt.imsave(jpegfn, img, **kwargs)
+        imsave(jpegfn, img, **kwargs)
     else:
         tmpfn = create_temp(suffix='.png')
-        plt.imsave(tmpfn, img, **kwargs)
+        imsave(tmpfn, img, **kwargs)
         cmd = ('pngtopnm %s | pnmtojpeg -quality 90 > %s' % (tmpfn, jpegfn))
         rtn = os.system(cmd)
         print(cmd, '->', rtn)
@@ -770,6 +770,8 @@ class LegacySurveyData(object):
         self.bricktree = None
         ### HACK! Hard-coded brick edge size, in degrees!
         self.bricksize = 0.25
+
+        self.psfex_conf = None
 
         # Cached CCD kd-tree --
         # - initially None, then a list of (fn, kd)
@@ -1002,6 +1004,23 @@ class LegacySurveyData(object):
                     break
                 tileh += 1
         return pat % dict(tilew=tilew,tileh=tileh)
+
+    def get_psfex_conf(self, camera, expnum, ccdname):
+        '''
+        Return additional psfex configuration flags for a given expnum and
+        ccdname.
+
+        Extra config flags are in the file $PSFEX_CONF_FILE.
+        '''
+        if self.psfex_conf is None:
+            self.psfex_conf = {}
+        if self.psfex_conf.get(camera, None) is None:
+            self.psfex_conf[camera] = read_psfex_conf(camera)
+        camconf = self.psfex_conf[camera]
+        res = camconf.get((expnum, ccdname.strip().upper()), '')
+        if res == '':
+            res = camconf.get((expnum, None), '')
+        return res
 
     def write_output(self, filetype, hashsum=True, filename=None, **kwargs):
         '''
@@ -1348,11 +1367,19 @@ class LegacySurveyData(object):
         T = self.cleanup_ccds_table(T)
         return T
 
+    def filter_annotated_ccds_files(self, fns):
+        '''
+        When reading the list of annotated CCDs,
+        filter file list using this function.
+        '''
+        return fns
+
     def get_annotated_ccds(self):
         '''
         Returns the annotated table of CCDs.
         '''
         fns = self.find_file('annotated-ccds')
+        fns = self.filter_annotated_ccds_files(fns)
         TT = []
         for fn in fns:
             debug('Reading annotated CCDs from', fn)
@@ -1579,8 +1606,51 @@ def run_calibs(X):
             raise
 
 def read_one_tim(X):
+    from astrometry.util.ttime import Time
     (im, targetrd, kwargs) = X
-    #print('Reading', im)
+    t0 = Time()
     tim = im.get_tractor_image(radecpoly=targetrd, **kwargs)
+    if tim is not None:
+        th,tw = tim.shape
+        print('Time to read %i x %i image, hdu %i:' % (tw,th, im.hdu), Time()-t0)
     return tim
 
+
+def read_psfex_conf(camera):
+    psfex_conf = {}
+    from pkg_resources import resource_filename
+    dirname = resource_filename('legacypipe', 'data')
+    fn = os.path.join(dirname, camera + '-special-psfex-conf.dat')
+    if not os.path.exists(fn):
+        info('could not find special psfex configuration file for ' +
+             camera + ' not using per-image psfex configurations.')
+        return psfex_conf
+    f = open(fn)
+    for line in f.readlines():
+        line = line.strip()
+        if len(line) == 0:
+            continue
+        if line[0] == '#':
+            continue
+        parts = line.split(None, maxsplit=1)
+        if len(parts) != 2:
+            print('Skipping line ', line)
+            continue
+        expname, flags = parts
+        if '-' in expname:
+            idparts = expname.split('-')
+            if len(idparts) != 2:
+                print('Skipping line ', line)
+                continue
+            expidstr = idparts[0].strip()
+            ccd = idparts[1].strip().upper()
+        else:
+            expidstr = expname.strip()
+            ccd = None
+        try:
+            expnum = int(expidstr, 10)
+        except ValueError:
+            print('Skipping line', line)
+            continue
+        psfex_conf[(expnum, ccd)] = flags
+    return psfex_conf

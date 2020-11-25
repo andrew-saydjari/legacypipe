@@ -61,7 +61,7 @@ def get_parser():
                         help='Include RA,Dec derivatives in forced photometry?')
 
     parser.add_argument('--agn', action='store_true',
-                        help='Add a point source to the center of each DEV/EXP/COMP galaxy?')
+                        help='Add a point source to the center of each DEV/EXP/SER galaxy?')
 
     parser.add_argument('--constant-invvar', action='store_true',
                         help='Set inverse-variance to a constant across the image?')
@@ -105,7 +105,7 @@ def main(survey=None, opt=None, args=None):
     print('Opt:', opt)
     print('Opt:', vars(opt))
 
-    t0 = tlast = Time()
+    t0 = Time()
     if opt.skip and os.path.exists(opt.outfn):
         print('Ouput file exists:', opt.outfn)
         sys.exit(0)
@@ -131,7 +131,7 @@ def main(survey=None, opt=None, args=None):
     try:
         expnum = int(opt.expnum)
         filename = None
-    except:
+    except ValueError:
         # make this 'None' for survey.find_ccds()
         expnum = None
         filename = opt.expnum
@@ -149,6 +149,8 @@ def main(survey=None, opt=None, args=None):
     if survey is None:
         survey = LegacySurveyData(survey_dir=opt.survey_dir)
 
+    # If there is only one catalog survey_dir, we pass it to get_catalog_in_wcs
+    # as the northern survey.
     catsurvey_north = survey
     catsurvey_south = None
 
@@ -157,8 +159,7 @@ def main(survey=None, opt=None, args=None):
         assert(opt.catalog_resolve_dec_ngc is not None)
         catsurvey_north = LegacySurveyData(survey_dir = opt.catalog_dir_north)
         catsurvey_south = LegacySurveyData(survey_dir = opt.catalog_dir_south)
-
-    if opt.catalog_dir is not None:
+    elif opt.catalog_dir is not None:
         catsurvey_north = LegacySurveyData(survey_dir = opt.catalog_dir)
 
     if filename is not None and hdu >= 0:
@@ -269,8 +270,6 @@ def main(survey=None, opt=None, args=None):
 
 def bounce_one_ccd(X):
     # for multiprocessing
-    #survey,catsurvey,ccd,opt,zoomslice,ps = X
-    #return run_one_ccd(survey, ccd, opt)
     return run_one_ccd(*X)
 
 def get_catalog_in_wcs(chipwcs, catsurvey_north, catsurvey_south=None, resolve_dec=None,
@@ -289,11 +288,13 @@ def get_catalog_in_wcs(chipwcs, catsurvey_north, catsurvey_south=None, resolve_d
 
         for b in bricks:
             # Skip bricks that are entirely on the wrong side of the resolve line (NGC only)
-            if resolve_dec is not None and b.gal_b > 0:
+            if resolve_dec is not None:
+                # Northern survey, brick too far south (max dec is below the resolve line)
                 if north and b.dec2 <= resolve_dec:
                     continue
-                if not(north) and b.dec1 >= resolve_dec:
-                    continue
+                # Southern survey, brick too far north (min dec is above the resolve line), but only in the North Galactic Cap
+                if not(north) and b.dec1 >= resolve_dec and b.gal_b > 0:
+                     continue
             # there is some overlap with this brick... read the catalog.
             fn = catsurvey.find_file('tractor', brick=b.brickname)
             if not os.path.exists(fn):
@@ -306,11 +307,12 @@ def get_catalog_in_wcs(chipwcs, catsurvey_north, catsurvey_south=None, resolve_d
                 'sersic', 'shape_r', 'shape_e1', 'shape_e2',
                 'ref_epoch', 'pmra', 'pmdec', 'parallax'
                 ])
-            if resolve_dec is not None and b.gal_b > 0:
+            if resolve_dec is not None:
                 if north:
                     T.cut(T.dec >= resolve_dec)
                     print('Cut to', len(T), 'north of the resolve line')
-                else:
+                elif b.gal_b > 0:
+                    # Northern galactic cap only: cut Southern survey
                     T.cut(T.dec <  resolve_dec)
                     print('Cut to', len(T), 'south of the resolve line')
             _,xx,yy = chipwcs.radec2pixelxy(T.ra, T.dec)
@@ -321,10 +323,6 @@ def get_catalog_in_wcs(chipwcs, catsurvey_north, catsurvey_south=None, resolve_d
             print('Cut to', len(T), 'sources within image + margin')
             T.cut(T.brick_primary)
             print('Cut to', len(T), 'on brick_primary')
-            for col in ['out_of_bounds', 'left_blob']:
-                if col in T.get_columns():
-                    T.cut(T.get(col) == False)
-                    print('Cut to', len(T), 'on', col)
             # drop DUP sources
             I, = np.nonzero([t.strip() != 'DUP' for t in T.type])
             T.cut(I)
@@ -337,7 +335,6 @@ def get_catalog_in_wcs(chipwcs, catsurvey_north, catsurvey_south=None, resolve_d
     T._header = TT[0]._header
     del TT
     print('Total of', len(T), 'catalog sources')
-
     return T
 
 def run_one_ccd(survey, catsurvey_north, catsurvey_south, resolve_dec,
@@ -361,6 +358,20 @@ def run_one_ccd(survey, catsurvey_north, catsurvey_south, resolve_dec,
     tnow = Time()
     print('Read image:', tnow-tlast)
     tlast = tnow
+
+    # The "north" and "south" directories often don't have
+    # 'survey-bricks" files of their own -- use the 'survey' one
+    # instead.
+    if catsurvey_south is not None:
+        try:
+            catsurvey_south.get_bricks_readonly()
+        except:
+            catsurvey_south.bricks = survey.get_bricks_readonly()
+    if catsurvey_north is not None:
+        try:
+            catsurvey_north.get_bricks_readonly()
+        except:
+            catsurvey_north.bricks = survey.get_bricks_readonly()
 
     # Apply outlier masks
     if True:
@@ -463,7 +474,7 @@ def run_one_ccd(survey, catsurvey_north, catsurvey_south, resolve_dec,
     # F.galdepth = np.array([-2.5 * (np.log10(5. * tim.sig1 / tim.galnorm) - 9)] * len(F)).astype(np.float32)
 
     print('opt.derivs:', opt.derivs)
-    
+
     # super units questions here
     if opt.derivs:
         cosdec = np.cos(np.deg2rad(T.dec))
@@ -486,7 +497,7 @@ def run_one_ccd(survey, catsurvey_north, catsurvey_south, resolve_dec,
     F.ra  = T.ra
     F.dec = T.dec
 
-    ok,x,y = tim.sip_wcs.radec2pixelxy(T.ra, T.dec)
+    _,x,y = tim.sip_wcs.radec2pixelxy(T.ra, T.dec)
     F.x = (x-1).astype(np.float32)
     F.y = (y-1).astype(np.float32)
 

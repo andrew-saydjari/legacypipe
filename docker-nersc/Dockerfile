@@ -103,7 +103,8 @@ RUN git clone http://github.com/dstndstn/astrometry.net.git astrometry \
     && make extra \
     && make install INSTALL_DIR=/usr/local \
     && make clean \
-    && (cd && PYTHONPATH=/usr/local/lib/python python3 -c "import astrometry; print(astrometry.__version__)")
+    && (cd && PYTHONPATH=/usr/local/lib/python python3 -c "import astrometry; print(astrometry.__version__)") \
+    && git describe && echo 0.84
 
 # Pip installs -- binary.  We need cython for the tractor.
 RUN for x in \
@@ -119,11 +120,11 @@ RUN for x in \
 # The Tractor
 RUN git clone http://github.com/dstndstn/tractor.git tractor \
     && cd tractor \
+    && git checkout dr9.4 \
     && python3 setup-cython.py --with-ceres install --home /usr/local \
     && make version && cp tractor/version.py /usr/local/lib/python/tractor/ \
     && rm -R $(find . -name "*.o" -o -name "*.so") \
-    && (cd && PYTHONPATH=/usr/local/lib/python python3 -c "import tractor; print(tractor.__version__)") \
-    && echo 2
+    && (cd && PYTHONPATH=/usr/local/lib/python python3 -c "import tractor; print(tractor.__version__)")
 
 # Pip installs -- built from source
 RUN pip --no-cache-dir install photutils
@@ -171,7 +172,8 @@ RUN apt -y update && apt install -y apt-utils \
 COPY --from=builder /usr/local /usr/local
 COPY --from=builder /opt/conda /opt/conda
 
-RUN pip --no-cache-dir install ipython Pillow healpy seaborn
+RUN conda update --no-deps certifi
+RUN pip --no-cache-dir install ipython Pillow healpy seaborn ipykernel
 
 WORKDIR /src
 
@@ -194,14 +196,17 @@ RUN git clone http://github.com/legacysurvey/legacypipe.git legacypipe \
 ENV PYTHONPATH /usr/local/lib/python:/src/unwise_psf/py:/src/legacypipe/py
 ENV PATH /opt/conda/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-ENV HOME /root
+RUN mkdir /homedir && chmod 777 /homedir
+ENV HOME /homedir
 
 # set prompt and default shell
 SHELL ["/bin/bash", "-c"]
+ENTRYPOINT ["/bin/bash", "-c"]
+CMD ["/bin/bash"]
 
-RUN echo "export PS1='[container] \\u@\\h:\\w$ '" >> /root/.bashrc \
-  # Create config files in /root
-  && mkdir /root/.qdo && echo "[qdo]" > /root/.qdo/qdorc \
+RUN echo "export PS1='[container] \\u@\\h:\\w$ '" >> $HOME/.bashrc \
+  # Create config files in $HOME
+  && mkdir $HOME/.qdo && echo "[qdo]" > $HOME/.qdo/qdorc \
   && python -c "import astropy" \
   && python -c "import matplotlib.font_manager as fm; f = fm.FontManager()" \
   && ipython -c "print('hello')" \
@@ -213,10 +218,8 @@ RUN echo "export PS1='[container] \\u@\\h:\\w$ '" >> /root/.bashrc \
   
 # Curses upon you, astropy
 RUN wget -O /opt/conda/lib/python3.7/site-packages/astropy/utils/iers/data/Leap_Second.dat \
-    https://raw.githubusercontent.com/astropy/astropy/master/astropy/utils/iers/data/Leap_Second.dat
-
-ENTRYPOINT ["/bin/bash", "-c"]
-CMD ["/bin/bash"]
+    https://raw.githubusercontent.com/astropy/astropy/master/astropy/utils/iers/data/Leap_Second.dat \
+    && rm $HOME/.wget-hsts
 
 RUN python -O -m compileall \
     -x lib2to3 \
@@ -232,6 +235,11 @@ RUN python -O -m compileall \
     /src/legacypipe/py/{legacypipe,legacyzpts}
 
 # update legacypipe
-RUN cd /src/legacypipe && git pull && git describe && echo 32 && \
+RUN cd /src/legacypipe && git pull && git checkout DR9.6.7 && git describe && echo 967 && \
   python    -m compileall /src/legacypipe/py/{legacypipe,legacyzpts} && \
   python -O -m compileall /src/legacypipe/py/{legacypipe,legacyzpts}
+
+# QDO
+RUN cd qdo && git remote add dstn https://bitbucket.org/dstn/qdo.git \
+    && git fetch dstn && git checkout handle-oom \
+    && pip install . && echo 3 #python3 setup.py install

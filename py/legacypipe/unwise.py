@@ -351,7 +351,9 @@ def unwise_forcedphot(cat, tiles, band=1, roiradecbox=None,
         patch = psf.getPointSourcePatch(h//2, w//2).patch
         psfnorm = np.sqrt(np.sum(patch**2))
         # To handle zero-depth, we return 1/nanomaggies^2 units rather than mags.
-        phot.get('psfdepth_%s' % wband)[I] = 1. / (tim.sig1 / psfnorm)**2
+        # In the small empty patches of the sky (eg W4 in 0922p702), we get sig1 = NaN
+        if np.isfinite(tim.sig1):
+            phot.get('psfdepth_%s' % wband)[I] = 1. / (tim.sig1 / psfnorm)**2
 
         tim.tile = tile
         tims.append(tim)
@@ -431,7 +433,7 @@ def unwise_forcedphot(cat, tiles, band=1, roiradecbox=None,
     if save_fits:
         for i,tim in enumerate(tims):
             tile = tim.tile
-            (dat, mod, ie, chi, _) = ims1[i]
+            (dat, mod, _, chi, _) = ims1[i]
             wcshdr = fitsio.FITSHDR()
             tim.wcs.wcs.add_to_header(wcshdr)
             tag = 'fit-%s-w%i' % (tile.coadd_id, band)
@@ -471,7 +473,7 @@ def unwise_forcedphot(cat, tiles, band=1, roiradecbox=None,
         for i,tim in enumerate(tims):
             tile = tim.tile
             tag = '%s W%i' % (tile.coadd_id, band)
-            (dat, mod, ie, chi, _) = ims1[i]
+            (dat, mod, _, chi, _) = ims1[i]
             sig1 = tim.sig1
             plt.clf()
             plt.imshow(dat, interpolation='nearest', origin='lower',

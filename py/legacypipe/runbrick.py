@@ -27,23 +27,18 @@ To see the code we run on each "blob" of pixels, see "oneblob.py".
 
 '''
 from __future__ import print_function
-if __name__ == '__main__':
-    import matplotlib
-    matplotlib.use('Agg')
 import sys
 import os
 
-import pylab as plt
 import numpy as np
 
 import fitsio
 
 from astrometry.util.fits import fits_table, merge_tables
-from astrometry.util.plotutils import dimshow
 from astrometry.util.ttime import Time
 
 from legacypipe.survey import get_rgb, imsave_jpeg
-from legacypipe.bits import DQ_BITS, MASKBITS
+from legacypipe.bits import DQ_BITS, MASKBITS, FITBITS
 from legacypipe.utils import RunbrickError, NothingToDoError, iterwrapper, find_unique_pixels
 from legacypipe.coadds import make_coadds, write_coadd_images, quick_coadds
 
@@ -90,6 +85,7 @@ def stage_tims(W=3600, H=3600, pixscale=0.262, brickname=None,
                unwise_modelsky_dir=None,
                galex_dir=None,
                command_line=None,
+               read_parallel=True,
                **kwargs):
     '''
     This is the first stage in the pipeline.  It
@@ -233,9 +229,9 @@ def stage_tims(W=3600, H=3600, pixscale=0.262, brickname=None,
         if survey.cache_dir is not None:
             im.check_for_cached_files(survey)
         ims.append(im)
-        info('  ', os.path.basename(im.imgfn), im, im.band, 'exptime', im.exptime, 'propid', ccd.propid,
+        info(' ', im, im.band, 'expnum', im.expnum, 'exptime', im.exptime, 'propid', ccd.propid,
               'seeing %.2f' % (ccd.fwhm*im.pixscale), 'MJD %.3f' % ccd.mjd_obs,
-              'object', getattr(ccd, 'object', '').strip())
+              'object', getattr(ccd, 'object', '').strip(), '\n   ', im.print_imgpath)
 
     tnow = Time()
     debug('Finding images touching brick:', tnow-tlast)
@@ -271,7 +267,10 @@ def stage_tims(W=3600, H=3600, pixscale=0.262, brickname=None,
                                 old_calibs_ok=old_calibs_ok))
                                 for im in ims]
     record_event and record_event('stage_tims: starting read_tims')
-    tims = list(mp.map(read_one_tim, args))
+    if read_parallel:
+        tims = list(mp.map(read_one_tim, args))
+    else:
+        tims = list(map(read_one_tim, args))
     record_event and record_event('stage_tims: done read_tims')
 
     tnow = Time()
@@ -350,8 +349,9 @@ def stage_tims(W=3600, H=3600, pixscale=0.262, brickname=None,
         version_header.add_record(dict(name='BAND%i' % i, value=band,
                                        comment='Band name in this catalog'))
 
+    _add_stage_version(version_header, 'TIMS', 'tims')
     keys = ['version_header', 'targetrd', 'pixscale', 'targetwcs', 'W','H',
-            'bands', 'tims', 'ps', 'brickid', 'brickname', 'brick', 'custom_brick',
+            'tims', 'ps', 'brickid', 'brickname', 'brick', 'custom_brick',
             'target_extent', 'ccds', 'bands', 'survey']
     L = locals()
     rtn = dict([(k,L[k]) for k in keys])
@@ -374,6 +374,7 @@ def stage_refs(survey=None,
                gaia_stars=True,
                large_galaxies=True,
                star_clusters=True,
+               plots=False, ps=None,
                record_event=None,
                **kwargs):
     from legacypipe.reference import get_reference_sources
@@ -384,14 +385,38 @@ def stage_refs(survey=None,
                                             tycho_stars=tycho_stars,
                                             gaia_stars=gaia_stars,
                                             large_galaxies=large_galaxies,
-                                            star_clusters=star_clusters)
+                                            star_clusters=star_clusters,
+                                            plots=plots, ps=ps)
     # "refstars" is a table
     # "refcat" is a list of tractor Sources
     # They are aligned
     if refstars:
+        from legacypipe.format_catalog import get_units_for_columns
         assert(len(refstars) == len(refcat))
+        cols = ['ra', 'dec', 'ref_cat', 'ref_id', 'mag',
+                'istycho', 'isgaia', 'islargegalaxy', 'iscluster',
+                'isbright', 'ismedium', 'freezeparams', 'pointsource', 'donotfit', 'in_bounds',
+                'ba', 'pa', 'decam_mag_g', 'decam_mag_r', 'decam_mag_z',
+                'zguess', 'mask_mag', 'radius', 'keep_radius', 'radius_pix', 'ibx', 'iby',
+                'ref_epoch', 'pmra', 'pmdec', 'parallax',
+                'ra_ivar', 'dec_ivar', 'pmra_ivar', 'pmdec_ivar', 'parallax_ivar',
+                # Gaia
+                'phot_g_mean_mag', 'phot_bp_mean_mag', 'phot_rp_mean_mag', 'phot_g_mean_flux_over_error',
+                'phot_bp_mean_flux_over_error', 'phot_rp_mean_flux_over_error', 'phot_g_n_obs',
+                'phot_bp_n_obs', 'phot_rp_n_obs', 'phot_variable_flag', 'astrometric_excess_noise',
+                'astrometric_excess_noise_sig', 'astrometric_n_obs_al', 'astrometric_n_good_obs_al',
+                'astrometric_weight_al', 'duplicated_source', 'a_g_val', 'e_bp_min_rp_val',
+                'phot_bp_rp_excess_factor', 'astrometric_sigma5d_max', 'astrometric_params_solved',
+                ]
+        # Drop columns that don't exist (because one of the ref catalogs has no entries or is
+        # not being used)
+        refcols = refstars.get_columns()
+        cols = [c for c in cols if c in refcols]
+        extra_units = dict(zguess='mag', pa='deg', radius='deg', keep_radius='deg')
+        units = get_units_for_columns(cols, [], extra_units)
         with survey.write_output('ref-sources', brick=brickname) as out:
-            refstars.writeto(None, fits_object=out.fits, primheader=version_header)
+            refstars.writeto(None, fits_object=out.fits, primheader=version_header,
+                             columns=cols, units=units)
 
     T_dup = None
     T_clusters = None
@@ -426,12 +451,16 @@ def stage_outliers(tims=None, targetwcs=None, W=None, H=None, bands=None,
                    mp=None, nsigma=None, plots=None, ps=None, record_event=None,
                    survey=None, brickname=None, version_header=None,
                    refstars=None, outlier_mask_file=None,
-                   outliers=True,
+                   outliers=True, cache_outliers=False,
                    **kwargs):
-    '''
-    This pipeline stage tries to detect artifacts in the individual
+    '''This pipeline stage tries to detect artifacts in the individual
     exposures, by blurring all images in the same band to the same PSF size,
     then searching for outliers.
+
+    *cache_outliers*: bool: if the outliers-mask*.fits.fz file exists
+    (from a previous run), use it.  We turn this off in production
+    because we still want to create the JPEGs and the checksum entry
+    for the outliers file.
     '''
     from legacypipe.outliers import patch_from_coadd, mask_outlier_pixels, read_outlier_mask_file
 
@@ -443,7 +472,9 @@ def stage_outliers(tims=None, targetwcs=None, W=None, H=None, bands=None,
                                    help='Are we applying outlier rejection?'))
 
     # Check for existing MEF containing masks for all the chips we need.
-    if outliers and not read_outlier_mask_file(survey, tims, brickname, outlier_mask_file=outlier_mask_file):
+    if (outliers and
+        not (cache_outliers and
+             read_outlier_mask_file(survey, tims, brickname, outlier_mask_file=outlier_mask_file))):
         # Make before-n-after plots (before)
         C = make_coadds(tims, bands, targetwcs, mp=mp, sbscale=False)
         with survey.write_output('outliers-pre', brick=brickname) as out:
@@ -469,7 +500,7 @@ def stage_outliers(tims=None, targetwcs=None, W=None, H=None, bands=None,
 
     return dict(tims=tims, version_header=version_header)
 
-def stage_halos(targetrd=None, pixscale=None, targetwcs=None,
+def stage_halos(pixscale=None, targetwcs=None,
                 W=None,H=None,
                 bands=None, ps=None, tims=None,
                 plots=False, plots2=False,
@@ -629,7 +660,7 @@ def stage_image_coadds(survey=None, targetwcs=None, bands=None, tims=None,
         del rgb
     return None
 
-def stage_srcs(targetrd=None, pixscale=None, targetwcs=None,
+def stage_srcs(pixscale=None, targetwcs=None,
                W=None,H=None,
                bands=None, ps=None, tims=None,
                plots=False, plots2=False,
@@ -664,12 +695,20 @@ def stage_srcs(targetrd=None, pixscale=None, targetwcs=None,
     _add_stage_version(version_header, 'SRCS', 'srcs')
     tlast = Time()
 
+    avoid_map = None
+    avoid_xyr = []
     if refstars:
         # Don't detect new sources where we already have reference stars
-        I = np.flatnonzero(refstars.in_bounds * (refstars.ref_epoch == 0))
+        # To treat fast-moving stars, we evaluate proper motions at each image
+        # epoch and exclude the set of integer pixel locations.
+        # Init with ref sources without proper motions:
+        I = np.flatnonzero(refstars.in_bounds * (refstars.ref_epoch == 0) *
+                           np.logical_not(refstars.islargegalaxy))
         xy = set(zip(refstars.ibx[I], refstars.iby[I]))
+        ns = len(xy)
         # For moving stars, evaluate position at epoch of each input image
-        I = np.flatnonzero(refstars.in_bounds * (refstars.ref_epoch > 0))
+        I = np.flatnonzero(refstars.in_bounds * (refstars.ref_epoch > 0) *
+                           np.logical_not(refstars.islargegalaxy))
         if len(I):
             from legacypipe.survey import radec_at_mjd
             for tim in tims:
@@ -679,27 +718,30 @@ def stage_srcs(targetrd=None, pixscale=None, targetwcs=None,
                     tim.time.toMjd())
                 _,xx,yy = targetwcs.radec2pixelxy(ra, dec)
                 xy.update(zip(np.round(xx-1.).astype(int), np.round(yy-1.).astype(int)))
-        ns = np.sum(refstars.in_bounds * (refstars.ref_epoch == 0))
         debug('Avoiding', ns, 'stationary and', len(xy)-ns, '(from %i stars) pixels' % np.sum(refstars.in_bounds * (refstars.ref_epoch > 0)))
-        # Add a ~1" exclusion zone around reference stars and large galaxies
+        # Add a ~1" exclusion zone around reference stars
         # (assuming pixel_scale ~ 0.25")
-        xy = np.array(list(xy)).astype(np.int32)
-        if len(xy):
-            avoid_x = xy[:,0]
-            avoid_y = xy[:,1]
-        else:
-            avoid_x = np.array([], np.int32)
-            avoid_y = np.array([], np.int32)
-        avoid_r = np.zeros_like(avoid_x) + 4
-        if T_clusters is not None:
-            info('Avoiding source detection in', len(T_clusters), 'CLUSTERs')
-            if len(T_clusters):
-                avoid_x = np.append(avoid_x, T_clusters.ibx)
-                avoid_y = np.append(avoid_y, T_clusters.iby)
-                avoid_r = np.append(avoid_r, T_clusters.radius_pix)
-                debug('CLUSTER pixel radii:', T_clusters.radius_pix)
+        r_excl = 4
+        avoid_xyr.extend([(x,y,r_excl) for x,y in xy])
+
+        # (We tried a larger exclusion radius on SGA sources, for
+        # pre-burning SGA catalog; results were so-so)
+        r_sga_excl = r_excl
+        J = np.flatnonzero(refstars.islargegalaxy * refstars.in_bounds)
+        avoid_xyr.extend([(x,y,r_sga_excl) for x,y in zip(refstars.ibx[J], refstars.iby[J])])
+    avoid_xyr = np.array(avoid_xyr, dtype=np.int32)
+    if len(avoid_xyr) > 0:
+        avoid_x = avoid_xyr[:,0]
+        avoid_y = avoid_xyr[:,1]
+        avoid_r = avoid_xyr[:,2]
     else:
-        avoid_x, avoid_y, avoid_r = np.array([], np.int32), np.array([], np.int32), np.array([])
+        avoid_x = avoid_y = avoid_r = np.array([], dtype=np.int32)
+    del avoid_xyr
+
+    if T_clusters is not None and len(T_clusters) > 0:
+        from legacypipe.reference import get_reference_map
+        info('Avoiding source detection in', len(T_clusters), 'CLUSTER masks')
+        avoid_map = (get_reference_map(targetwcs, T_clusters) != 0)
 
     record_event and record_event('stage_srcs: detection maps')
     tnow = Time()
@@ -737,10 +779,8 @@ def stage_srcs(targetrd=None, pixscale=None, targetwcs=None,
     Tnew,newcat,hot = run_sed_matched_filters(
         SEDs, bands, detmaps, detivs, (avoid_x,avoid_y,avoid_r), targetwcs,
         nsigma=nsigma, saddle_fraction=saddle_fraction, saddle_min=saddle_min,
-        saturated_pix=saturated_pix, plots=plots, ps=ps, mp=mp, **kwa)
-
-    #if Tnew is None:
-    #    raise NothingToDoError('No sources detected.')
+        saturated_pix=saturated_pix, veto_map=avoid_map,
+        plots=plots, ps=ps, mp=mp, **kwa)
 
     if Tnew is not None:
         assert(len(Tnew) == len(newcat))
@@ -755,6 +795,10 @@ def stage_srcs(targetrd=None, pixscale=None, targetwcs=None,
     cats = []
     tables = []
     if Tnew is not None:
+        for src,ix,iy in zip(newcat, Tnew.ibx, Tnew.iby):
+            for satmap in saturated_pix:
+                if satmap[iy, ix]:
+                    src.needs_initial_flux = True
         cats.extend(newcat)
         tables.append(Tnew)
     if refstars and len(refstars):
@@ -812,6 +856,8 @@ def stage_srcs(targetrd=None, pixscale=None, targetwcs=None,
         hot |= merging
 
         if plots:
+            import pylab as plt
+            from astrometry.util.plotutils import dimshow
             plt.clf()
             plt.subplot(1,2,1)
             dimshow((hot*1) + (any_saturated*1), vmin=0, vmax=2, cmap='hot')
@@ -932,9 +978,6 @@ def stage_fitblobs(T=None,
         from legacypipe.runbrick_plots import fitblobs_plots
         fitblobs_plots(tims, bands, targetwcs, blobslices, blobsrcs, cat,
                        blobmap, ps)
-
-    T.orig_ra  = T.ra.copy()
-    T.orig_dec = T.dec.copy()
 
     tnow = Time()
     debug('Fitblobs:', tnow-tlast)
@@ -1194,7 +1237,9 @@ def stage_fitblobs(T=None,
               'blob_width', 'blob_height', 'blob_npix',
               'blob_nimages', 'blob_totalpix',
               'blob_symm_width', 'blob_symm_height', 'blob_symm_npix',
-              'blob_symm_nimages', 'hit_limit', 'dchisq',
+              'blob_symm_nimages', 'bx0', 'by0',
+              'hit_limit', 'hit_ser_limit', 'hit_r_limit',
+              'dchisq',
               'force_keep_source', 'fit_background', 'forced_pointsource']:
         T.set(k, BB.get(k))
 
@@ -1204,8 +1249,6 @@ def stage_fitblobs(T=None,
     dup_cat = []
     if T_dup:
         from legacypipe.survey import GaiaSource
-        print('T_dup:')
-        T_dup.about()
         T_dup.type = np.array(['DUP']*len(T_dup))
         T_dup.dup = np.ones(len(T_dup), bool)
         Tall.append(T_dup)
@@ -1230,6 +1273,9 @@ def stage_fitblobs(T=None,
     T.ibx = np.round(T.bx).astype(np.int32)
     T.iby = np.round(T.by).astype(np.int32)
     T.in_bounds = ((T.ibx >= 0) * (T.iby >= 0) * (T.ibx < W) * (T.iby < H))
+    # DUP sources are Gaia/Tycho-2 stars, so fill in bx0=bx.
+    T.bx0[T.dup] = T.bx[T.dup]
+    T.by0[T.dup] = T.by[T.dup]
 
     # Order sources by RA.
     # (Here we're just setting 'objid', not actually reordering arrays.)
@@ -1639,18 +1685,19 @@ def _get_both_mods(X):
 
     srcs_blobs = list(zip(srcs, srcblobs))
 
+    fro_rd = set()
     if frozen_galaxies is not None:
         from tractor.patch import ModelMask
         timblobs = set(timblobmap.ravel())
         timblobs.discard(-1)
         h,w = tim.shape
         mm = ModelMask(0, 0, w, h)
-        for src,bb in frozen_galaxies.items():
+        for fro,bb in frozen_galaxies.items():
             # Does this source (which touches blobs bb) touch any blobs in this tim?
             touchedblobs = timblobs.intersection(bb)
             if len(touchedblobs) == 0:
                 continue
-            patch = src.getModelPatch(tim, modelMask=mm)
+            patch = fro.getModelPatch(tim, modelMask=mm)
             if patch is None:
                 continue
             patch.addTo(mod)
@@ -1661,6 +1708,7 @@ def _get_both_mods(X):
             blobmod += patch.patch * blobmask
 
             if plots:
+                import pylab as plt
                 plt.clf()
                 plt.imshow(blobmask, interpolation='nearest', origin='lower', vmin=0, vmax=1,
                            cmap='gray')
@@ -1674,20 +1722,24 @@ def _get_both_mods(X):
 
             # Drop this frozen galaxy from the catalog to render, if it is present
             # (ie, if it is in_bounds)
-            # Can't use "==": they're not the same objects; the "srcs" have been
-            # to oneblob.py and back, and, eg, get their EllipseE types changed.
-            srcs_blobs = [(s,b) for s,b in srcs_blobs
-                          if not (s is not None and
-                                  s.pos.ra  == src.pos.ra and
-                                  s.pos.dec == src.pos.dec)]
+            fro_rd.add((fro.pos.ra, fro.pos.dec))
 
+    NEA = []
+    no_nea = [0.,0.,0.]
+    pcal = tim.getPhotoCal()
     for src,srcblob in srcs_blobs:
         if src is None:
+            NEA.append(no_nea)
+            continue
+        if (src.pos.ra, src.pos.dec) in fro_rd:
+            # Skip frozen galaxy source (here we choose not to compute NEA)
+            NEA.append(no_nea)
             continue
         patch = src.getModelPatch(tim)
         if patch is None:
+            NEA.append(no_nea)
             continue
-        # From patch.addTo()
+        # From patch.addTo() -- find pixel overlap region
         (ih, iw) = mod.shape
         (ph, pw) = patch.shape
         (outx, inx) = get_overlapping_region(
@@ -1695,15 +1747,38 @@ def _get_both_mods(X):
         (outy, iny) = get_overlapping_region(
             patch.y0, patch.y0 + ph - 1, 0, ih - 1)
         if inx == [] or iny == []:
+            NEA.append(no_nea)
             continue
+        # model image patch
         p = patch.patch[iny, inx]
+        # add to model image
         mod[outy, outx] += p
         # mask by blob map
-        blobmod[outy, outx] += p * (timblobmap[outy,outx] == srcblob)
+        maskedp = p * (timblobmap[outy,outx] == srcblob)
+        # add to blob-masked image
+        blobmod[outy, outx] += maskedp
+        # per-image NEA computations
+        # total flux
+        flux = pcal.brightnessToCounts(src.brightness)
+        # flux in patch
+        pflux = np.sum(p)
+        # weighting -- fraction of flux that is in the patch
+        fracin = pflux / flux
+        # nea
+        if pflux == 0: # sum(p**2) can only be zero if all(p==0), and then pflux==0
+            nea = 0.
+        else:
+            nea = pflux**2 / np.sum(p**2)
+        mpsq = np.sum(maskedp**2)
+        if mpsq == 0 or pflux == 0:
+            mnea = 0.
+        else:
+            mnea = flux**2 / mpsq
+        NEA.append([nea, mnea, fracin])
 
     if hasattr(tim.psf, 'clear_cache'):
         tim.psf.clear_cache()
-    return mod, blobmod
+    return mod, blobmod, NEA
 
 def stage_coadds(survey=None, bands=None, version_header=None, targetwcs=None,
                  tims=None, ps=None, brickname=None, ccds=None,
@@ -1743,6 +1818,8 @@ def stage_coadds(survey=None, bands=None, version_header=None, targetwcs=None,
         ccds.writeto(None, fits_object=out.fits, primheader=primhdr)
 
     if plots and False:
+        import pylab as plt
+        from astrometry.util.plotutils import dimshow
         cat_init = [src for it,src in zip(T.iterative, cat) if not(it)]
         cat_iter = [src for it,src in zip(T.iterative, cat) if it]
         print(len(cat_init), 'initial sources and', len(cat_iter), 'iterative')
@@ -1793,13 +1870,20 @@ def stage_coadds(survey=None, bands=None, version_header=None, targetwcs=None,
                 if blobmap[yy,xx] != -1:
                     bb.append(blobmap[yy,xx])
 
-    I = np.flatnonzero(T.regular)
-    bothmods = mp.map(_get_both_mods, [(tim, [cat[i] for i in I], T.blob[I], blobmap,
+    Ireg = np.flatnonzero(T.regular)
+    Nreg = len(Ireg)
+    bothmods = mp.map(_get_both_mods, [(tim, [cat[i] for i in Ireg], T.blob[Ireg], blobmap,
                                         targetwcs, frozen_galaxies, ps, plots)
                                        for tim in tims])
-    mods     = [m for m,b in bothmods]
-    blobmods = [b for m,b in bothmods]
-    del bothmods
+    mods     = [r[0] for r in bothmods]
+    blobmods = [r[1] for r in bothmods]
+    NEA      = [r[2] for r in bothmods]
+    NEA = np.array(NEA)
+    # NEA shape (tims, srcs, 3:[nea, blobnea, weight])
+    neas        = NEA[:,:,0]
+    blobneas    = NEA[:,:,1]
+    nea_wts     = NEA[:,:,2]
+    del bothmods, NEA
     tnow = Time()
     debug('Model images:', tnow-tlast)
     tlast = tnow
@@ -1841,9 +1925,43 @@ def stage_coadds(survey=None, bands=None, version_header=None, targetwcs=None,
     # store galaxy sim bounding box in Tractor cat
     if 'sims_xy' in C.T.get_columns():
         cols.append('sims_xy')
-
     for c in cols:
         T.set(c, C.T.get(c))
+
+    # average NEA stats per band -- after psfsize,psfdepth computed.
+    # first init all bands expected by format_catalog
+    for band in survey.allbands:
+        T.set('nea_%s' % band, np.zeros(len(T), np.float32))
+        T.set('blob_nea_%s' % band, np.zeros(len(T), np.float32))
+    for iband,band in enumerate(bands):
+        num  = np.zeros(Nreg, np.float32)
+        den  = np.zeros(Nreg, np.float32)
+        bnum = np.zeros(Nreg, np.float32)
+        for tim,nea,bnea,nea_wt in zip(
+                tims, neas, blobneas, nea_wts):
+            if not tim.band == band:
+                continue
+            iv = 1./(tim.sig1**2)
+            I, = np.nonzero(nea)
+            wt = nea_wt[I]
+            num[I] += iv * wt * 1./(nea[I] * tim.imobj.pixscale**2)
+            den[I] += iv * wt
+            I, = np.nonzero(bnea)
+            bnum[I] += iv * 1./bnea[I]
+        # bden is the coadded per-pixel inverse variance derived from psfdepth and psfsize
+        # this ends up in arcsec units, not pixels
+        bden = T.psfdepth[Ireg,iband] * (4 * np.pi * (T.psfsize[Ireg,iband]/2.3548)**2)
+        # numerator and denominator are for the inverse-NEA!
+        with np.errstate(divide='ignore', invalid='ignore'):
+            nea  = den  / num
+            bnea = bden / bnum
+        nea [np.logical_not(np.isfinite(nea ))] = 0.
+        bnea[np.logical_not(np.isfinite(bnea))] = 0.
+        # Set vals in T
+        T.get('nea_%s' % band)[Ireg] = nea
+        T.get('blob_nea_%s' % band)[Ireg] = bnea
+
+    # Grab aperture fluxes
     assert(C.AP is not None)
     # How many apertures?
     A = len(apertures_arcsec)
@@ -1863,6 +1981,7 @@ def stage_coadds(survey=None, bands=None, version_header=None, targetwcs=None,
         D.writeto(None, fits_object=out.fits)
     del D
 
+    # Create JPEG coadds
     coadd_list= [('image', C.coimgs, {}),
                  ('model', C.comods, {}),
                  ('blobmodel', C.coblobmods, {}),
@@ -1876,13 +1995,12 @@ def stage_coadds(survey=None, bands=None, version_header=None, targetwcs=None,
         if coadd_bw and len(bands) == 1:
             rgb = rgb.sum(axis=2)
             kwa = dict(cmap='gray')
-
         with survey.write_output(name + '-jpeg', brick=brickname) as out:
             imsave_jpeg(out.fn, rgb, origin='lower', **kwa)
             info('Wrote', out.fn)
         del rgb
 
-    # Construct a mask bits map
+    # Construct the maskbits map
     maskbits = np.zeros((H,W), np.int16)
     # !PRIMARY
     if not custom_brick:
@@ -1926,38 +2044,48 @@ def stage_coadds(survey=None, bands=None, version_header=None, targetwcs=None,
         ('WISEM2',    'WISE2', 'WISE W2 (all masks)'),
         ('BAILOUT',   'BAIL',  'Bailed out processing'),
         ('MEDIUM',    'MED',   'medium-bright star'),
-        ('GALAXY',    'GAL',   'LSLGA large galaxy'),
+        ('GALAXY',    'GAL',   'SGA large galaxy'),
         ('CLUSTER',   'CLUST', 'Globular cluster')]
     version_header.add_record(dict(name='COMMENT', value='maskbits bits:'))
-    for key,short,comm in mbits:
-        version_header.add_record(
-            dict(name='MB_%s'%short, value=MASKBITS[key],
-                 comment='Maskbit: %s'%comm))
-    revmap = dict([(bit,name) for name,bit in MASKBITS.items()])
-    nicemap = dict([(k,c) for k,short,c in mbits])
-    for bit in range(16):
-        bitval = 1<<bit
-        if not bitval in revmap:
-            continue
-        name = revmap[bitval]
-        nice = nicemap.get(name, '')
-        version_header.add_record(
-            dict(name='MBIT_%i' % bit, value=name,
-                 comment='maskbits bit %i (0x%x): %s' % (bit, bitval, nice)))
+    _add_bit_description(version_header, MASKBITS, mbits,
+                         'MB_%s', 'MBIT_%i', 'maskbits')
+
+    # Add the fitbits header cards to version_header
+    fbits = [
+        ('FORCED_POINTSOURCE',  'FPSF',  'forced to be PSF'),
+        ('FIT_BACKGROUND',      'FITBG', 'background levels fit'),
+        ('HIT_RADIUS_LIMIT',    'RLIM',  'hit radius limit during fit'),
+        ('HIT_SERSIC_LIMIT',    'SLIM',  'hit Sersic index limit during fit'),
+        ('FROZEN',              'FROZE', 'parameters were not fit'),
+        ('BRIGHT',              'BRITE', 'bright star'),
+        ('MEDIUM',              'MED',   'medium-bright star'),
+        ('GAIA',                'GAIA',  'Gaia source'),
+        ('TYCHO2',              'TYCHO', 'Tycho-2 star'),
+        ('LARGEGALAXY',         'LGAL',  'SGA large galaxy'),
+        ('WALKER',              'WALK',  'fitting moved pos > 1 arcsec'),
+        ('RUNNER',              'RUN',   'fitting moved pos > 2.5 arcsec'),
+        ('GAIA_POINTSOURCE',    'GPSF',  'Gaia source treated as point source'),
+        ('ITERATIVE',           'ITER',  'source detected during iterative detection'),
+        ]
+    version_header.add_record(dict(name='COMMENT', value='fitbits bits:'))
+    _add_bit_description(version_header, FITBITS, fbits,
+                         'FB_%s', 'FBIT_%i', 'fitbits')
 
     if plots:
+        import pylab as plt
+        from astrometry.util.plotutils import dimshow
         plt.clf()
         ra  = np.array([src.getPosition().ra  for src in cat])
         dec = np.array([src.getPosition().dec for src in cat])
-        ok,x0,y0 = targetwcs.radec2pixelxy(T.orig_ra, T.orig_dec)
+        x0,y0 = T.bx0, T.by0
         ok,x1,y1 = targetwcs.radec2pixelxy(ra, dec)
+        x1 -= 1.
+        y1 -= 1.
         dimshow(get_rgb(C.coimgs, bands))
         ax = plt.axis()
-        #plt.plot(np.vstack((x0,x1))-1, np.vstack((y0,y1))-1, 'r-')
-        I = np.flatnonzero(T.orig_ra != 0.)
-        for xx0,yy0,xx1,yy1 in zip(x0[I],y0[I],x1[I],y1[I]):
-            plt.plot([xx0-1,xx1-1], [yy0-1,yy1-1], 'r-')
-        plt.plot(x1-1, y1-1, 'r.')
+        for xx0,yy0,xx1,yy1 in zip(x0,y0,x1,y1):
+            plt.plot([xx0,xx1], [yy0,yy1], 'r-')
+        plt.plot(x1, y1, 'r.')
         plt.axis(ax)
         plt.title('Original to final source positions')
         ps.savefig()
@@ -2021,6 +2149,23 @@ def stage_coadds(survey=None, bands=None, version_header=None, targetwcs=None,
                 apertures_arcsec=apertures_arcsec,
                 maskbits=maskbits,
                 version_header=version_header)
+
+def _add_bit_description(header, BITS, bits, bnpat, bitpat, bitmapname):
+    for key,short,comm in bits:
+        header.add_record(
+            dict(name=bnpat % short, value=BITS[key],
+                 comment='%s: %s' % (bitmapname, comm)))
+    revmap = dict([(bit,name) for name,bit in BITS.items()])
+    nicemap = dict([(k,c) for k,short,c in bits])
+    for bit in range(16):
+        bitval = 1<<bit
+        if not bitval in revmap:
+            continue
+        name = revmap[bitval]
+        nice = nicemap.get(name, '')
+        header.add_record(
+            dict(name=bitpat % bit, value=name,
+                 comment='%s bit %i (0x%x): %s' % (bitmapname, bit, bitval, nice)))
 
 def get_fiber_fluxes(cat, T, targetwcs, H, W, pixscale, bands,
                      fibersize=1.5, seeing=1., year=2020.0,
@@ -2103,6 +2248,7 @@ def get_fiber_fluxes(cat, T, targetwcs, H, W, pixscale, bands,
             fibertotflux[I, iband] = f[I]
 
     if plots:
+        import pylab as plt
         for modimg,band in zip(modimgs, bands):
             plt.clf()
             plt.imshow(modimg, interpolation='nearest', origin='lower',
@@ -2368,7 +2514,6 @@ def stage_wise_forced(
                 iv = np.zeros_like(d)
                 iv[d != 0.] = 1./(d[d != 0]**2)
                 WISE.set('apflux_ivar_w%i' % band, iv)
-                print('Setting WISE apphot')
 
         # Look up mask values for sources
         WISE.wise_mask = np.zeros((len(cat), 2), np.uint8)
@@ -2538,12 +2683,24 @@ def stage_writecat(
     T.fiberflux, T.fibertotflux = get_fiber_fluxes(
         cat, T, targetwcs, H, W, pixscale, bands, plots=plots, ps=ps)
 
-    # For reference stars, plug in the reference-catalog inverse-variances.
-    if 'ref_id' in T.get_columns() and 'ra_ivar' in T.get_columns():
-        I, = np.nonzero(T.ref_id)
+    # For reference *stars* only, plug in the reference-catalog inverse-variances.
+    if 'ref_cat' in T.get_columns() and 'ra_ivar' in T_orig.get_columns():
+        I = np.isin(T.ref_cat, ['G2', 'T2'])
         if len(I):
             T.ra_ivar [I] = T_orig.ra_ivar [I]
             T.dec_ivar[I] = T_orig.dec_ivar[I]
+
+    # In oneblob.py we have a step where we zero out the fluxes for sources
+    # with tiny "fracin" values.  Repeat that here, but zero out more stuff...
+    for iband,band in enumerate(bands):
+        # we could do this on the 2d arrays...
+        I = np.flatnonzero(T.fracin[:,iband] < 1e-3)
+        debug('Zeroing out', len(I), 'objs in', band, 'band with small fracin.')
+        if len(I):
+            # zero out:
+            T.flux[I,iband] = 0.
+            T.flux_ivar[I,iband] = 0.
+            # zero out fracin itself??
 
     primhdr = fitsio.FITSHDR()
     for r in version_header.records():
@@ -2641,16 +2798,6 @@ def stage_writecat(
             T.set(c, GALEX.get(c))
         GALEX = None
 
-    # Brick pixel positions
-    ok,bx,by = targetwcs.radec2pixelxy(T.orig_ra, T.orig_dec)
-    # iterative sources
-    bx[ok==False] = 1.
-    by[ok==False] = 1.
-    T.bx0 = (bx - 1.).astype(np.float32)
-    T.by0 = (by - 1.).astype(np.float32)
-    T.delete_column('orig_ra')
-    T.delete_column('orig_dec')
-
     T.brick_primary = ((T.ra  >= brick.ra1 ) * (T.ra  < brick.ra2) *
                         (T.dec >= brick.dec1) * (T.dec < brick.dec2))
     H,W = maskbits.shape
@@ -2658,9 +2805,38 @@ def stage_writecat(
                           np.clip(T.ibx, 0, W-1).astype(int)]
     del maskbits
 
+    # Set Sersic indices for all galaxy types.
     # sigh, bytes vs strings.  In py3, T.type (dtype '|S3') are bytes.
     T.sersic[np.array([t in ['DEV',b'DEV'] for t in T.type])] = 4.0
     T.sersic[np.array([t in ['EXP',b'EXP'] for t in T.type])] = 1.0
+    T.sersic[np.array([t in ['REX',b'REX'] for t in T.type])] = 1.0
+
+    T.fitbits = np.zeros(len(T), np.int16)
+    T.fitbits[T.forced_pointsource] |= FITBITS['FORCED_POINTSOURCE']
+    T.fitbits[T.fit_background]     |= FITBITS['FIT_BACKGROUND']
+    T.fitbits[T.hit_r_limit]        |= FITBITS['HIT_RADIUS_LIMIT']
+    T.fitbits[T.hit_ser_limit]      |= FITBITS['HIT_SERSIC_LIMIT']
+    # WALKER/RUNNER
+    moved = np.hypot(T.bx - T.bx0, T.by - T.by0)
+    # radii in pixels:
+    walk_radius = 1.  / pixscale
+    run_radius  = 2.5 / pixscale
+    T.fitbits[moved > walk_radius] |= FITBITS['WALKER']
+    T.fitbits[moved > run_radius ] |= FITBITS['RUNNER']
+    # do we have Gaia?
+    if 'pointsource' in T.get_columns():
+        T.fitbits[T.pointsource]       |= FITBITS['GAIA_POINTSOURCE']
+    T.fitbits[T.iterative]         |= FITBITS['ITERATIVE']
+
+    for col,bit in [('freezeparams',  'FROZEN'),
+                    ('isbright',      'BRIGHT'),
+                    ('ismedium',      'MEDIUM'),
+                    ('isgaia',        'GAIA'),
+                    ('istycho',       'TYCHO2'),
+                    ('islargegalaxy', 'LARGEGALAXY')]:
+        if not col in T.get_columns():
+            continue
+        T.fitbits[T.get(col)] |= FITBITS[bit]
 
     with survey.write_output('tractor-intermediate', brick=brickname) as out:
         T[np.argsort(T.objid)].writeto(None, fits_object=out.fits, primheader=primhdr)
@@ -2674,7 +2850,8 @@ def stage_writecat(
             T.rename(c, c.lower())
     from legacypipe.format_catalog import format_catalog
     with survey.write_output('tractor', brick=brickname) as out:
-        format_catalog(T[np.argsort(T.objid)], None, primhdr, survey.allbands, None, release,
+        format_catalog(T[np.argsort(T.objid)], None, primhdr, bands,
+                       survey.allbands, None, release,
                        write_kwargs=dict(fits_object=out.fits),
                        N_wise_epochs=15, motions=gaia_stars, gaia_tagalong=True)
 
@@ -2696,6 +2873,21 @@ def stage_writecat(
     record_event and record_event('stage_writecat: done')
     return dict(T=T, version_header=version_header)
 
+def stage_checksum(
+        survey=None,
+        brickname=None,
+        **kwargs):
+    '''
+    For debugging / special-case processing, write out the current checksums file.
+    '''
+    # produce per-brick checksum file.
+    with survey.write_output('checksums', brick=brickname, hashsum=False) as out:
+        f = open(out.fn, 'w')
+        # Write our pre-computed hashcodes.
+        for fn,hashsum in survey.output_file_hashes.items():
+            f.write('%s *%s\n' % (hashsum, fn))
+        f.close()
+
 def run_brick(brick, survey, radec=None, pixscale=0.262,
               width=3600, height=3600,
               survey_blob_mask=None,
@@ -2713,6 +2905,7 @@ def run_brick(brick, survey, radec=None, pixscale=0.262,
               iterative=False,
               wise=True,
               outliers=True,
+              cache_outliers=False,
               lanczos=True,
               early_coadds=False,
               blob_image=False,
@@ -2749,6 +2942,7 @@ def run_brick(brick, survey, radec=None, pixscale=0.262,
               plots=False, plots2=False, coadd_bw=False,
               plot_base=None, plot_number=0,
               command_line=None,
+              read_parallel=True,
               record_event=None,
     # These are for the 'stages' infrastructure
               pickle_pat='pickles/runbrick-%(brick)s-%%(stage)s.pickle',
@@ -2980,6 +3174,7 @@ def run_brick(brick, survey, radec=None, pixscale=0.262,
                   reoptimize=reoptimize,
                   iterative=iterative,
                   outliers=outliers,
+                  cache_outliers=cache_outliers,
                   use_ceres=ceres,
                   wise_ceres=wise_ceres,
                   unwise_coadds=unwise_coadds,
@@ -2994,6 +3189,7 @@ def run_brick(brick, survey, radec=None, pixscale=0.262,
                   galex=galex,
                   galex_dir=galex_dir,
                   command_line=command_line,
+                  read_parallel=read_parallel,
                   plots=plots, plots2=plots2, coadd_bw=coadd_bw,
                   force=forceStages, write=write_pickles,
                   record_event=record_event)
@@ -3101,6 +3297,9 @@ def run_brick(brick, survey, radec=None, pixscale=0.262,
             'srcs': 'fit_on_coadds',
         })
 
+    # HACK -- set the prereq to the stage after which you'd like to write out checksums.
+    prereqs.update({'checksum': 'outliers'})
+
     if prereqs_update is not None:
         prereqs.update(prereqs_update)
 
@@ -3135,6 +3334,10 @@ def run_brick(brick, survey, radec=None, pixscale=0.262,
                      initial_args=initargs, **kwargs)
 
     info('All done:', StageTime()-t0)
+
+    if pool is not None:
+        pool.close()
+        pool.join()
     return R
 
 def flush(x=None):
@@ -3364,6 +3567,8 @@ python -u legacypipe/runbrick.py --plots --brick 2440p070 --zoom 1900 2400 450 9
                         action='store_false', help='Turn off writing FITS and JPEG unWISE coadds?')
     parser.add_argument('--no-outliers', dest='outliers', default=True,
                         action='store_false', help='Do not compute or apply outlier masks')
+    parser.add_argument('--cache-outliers', default=False,
+                        action='store_true', help='Use outlier-mask file if it exists?')
 
     parser.add_argument('--bail-out', default=False, action='store_true',
                         help='Bail out of "fitblobs" processing, writing all blobs from the checkpoint and skipping any remaining ones.')
@@ -3385,6 +3590,8 @@ python -u legacypipe/runbrick.py --plots --brick 2440p070 --zoom 1900 2400 450 9
                         help="""Sky-subtraction radii: rmask, rin, rout [arcsec] (only used with --fit-on-coadds and --no-subsky).
                         Image pixels r<rmask are fully masked and the pedestal sky background is estimated from an annulus
                         rin<r<rout on each CCD centered on the targetwcs.crval coordinates.""")
+    parser.add_argument('--read-serial', dest='read_parallel', default=True,
+                        action='store_false', help='Read images in series, not in parallel?')
     return parser
 
 def get_runbrick_kwargs(survey=None,
@@ -3543,6 +3750,9 @@ def main(args=None):
     logging.getLogger('tractor.engine').setLevel(lvl + 10)
 
     if opt.plots:
+        import matplotlib
+        matplotlib.use('Agg')
+        import pylab as plt
         plt.figure(figsize=(12,9))
         plt.subplots_adjust(left=0.07, right=0.99, bottom=0.07, top=0.93,
                             hspace=0.2, wspace=0.05)
@@ -3596,7 +3806,7 @@ def main(args=None):
         ps_shutdown.set()
         print('Attempting to join the ps thread...')
         ps_thread.join(1.0)
-        if ps_thread.isAlive():
+        if ps_thread.is_alive():
             print('ps thread is still alive.')
 
     return rtn

@@ -16,13 +16,12 @@ def _build_objmask(img, ivar, skypix, boxcar=5, boxsize=1024):
     """
     from scipy.ndimage.morphology import binary_dilation
     from scipy.ndimage.filters import uniform_filter
-    
     from tractor.splinesky import SplineSky
-    
+
     # Get an initial guess of the sky using the mode, otherwise the median.
     skysig1 = 1.0 / np.sqrt(np.median(ivar[skypix]))
     skyval = np.median(img[skypix])
-   
+
     # Mask objects in a boxcar-smoothed (image - initial sky model), smoothed by
     # a boxcar filter before cutting pixels above the n-sigma threshold.
     if min(img.shape) / boxsize < 4: # handle half-DECam chips
@@ -53,7 +52,7 @@ def coadds_ubercal(fulltims, coaddtims=None, plots=False, plots2=False,
     Some notes on the procedure:
 
     A x = b
-    A: weights 
+    A: weights
     A: shape noverlap x nimg
     - entries have units of weights
 
@@ -69,7 +68,6 @@ def coadds_ubercal(fulltims, coaddtims=None, plots=False, plots2=False,
     from astrometry.util.resample import resample_with_wcs, OverlapError
 
     band = fulltims[0].band
-    
     nimg = len(fulltims)
     indx = np.arange(nimg)
 
@@ -106,11 +104,11 @@ def coadds_ubercal(fulltims, coaddtims=None, plots=False, plots2=False,
     noverlap = ioverlap
     A = A[:noverlap, :]
     b = b[:noverlap]
-    if verbose:
-        print('A:')
-        print(A)
-        print('b:')
-        print(b)
+    #if verbose:
+    #    print('A:')
+    #    print(A)
+    #    print('b:')
+    #    print(b)
 
     R = np.linalg.lstsq(A, b, rcond=None)
 
@@ -137,10 +135,10 @@ def coadds_ubercal(fulltims, coaddtims=None, plots=False, plots2=False,
                 plt.hist((coaddtims[ii].data + correction).ravel(), bins=50, histtype='step', range=(-5, 5))
             plt.title('Band %s: tim pix + correction' % band)
             ps.savefig()
-    
     return x
 
 def ubercal_skysub(tims, targetwcs, survey, brickname, bands, mp,
+                   subsky_radii=None,
                    plots=False, plots2=False, ps=None, verbose=False):
     """With the ubercal option, we (1) read the full-field mosaics ('bandtims') for
     a given bandpass and put them all on the same 'system' using the overlapping
@@ -160,6 +158,67 @@ def ubercal_skysub(tims, targetwcs, survey, brickname, bands, mp,
         import matplotlib.pyplot as plt
 
     if plots:
+        import matplotlib.patches as patches
+
+        refs, _ = get_reference_sources(survey, targetwcs, targetwcs.pixel_scale(), ['r'],
+                                        tycho_stars=False, gaia_stars=False,
+                                        large_galaxies=True, star_clusters=False)
+
+        pixscale = targetwcs.pixel_scale()
+        width = targetwcs.get_width() * pixscale / 3600 # [degrees]
+        bb, bbcc = targetwcs.radec_bounds(), targetwcs.radec_center() # [degrees]
+        pad = 0.5 * width # [degrees]
+
+        delta = np.max( (np.diff(bb[0:2]), np.diff(bb[2:4])) ) / 2 + pad / 2
+        xlim = bbcc[0] - delta, bbcc[0] + delta
+        ylim = bbcc[1] - delta, bbcc[1] + delta
+
+        plt.clf()
+        _, allax = plt.subplots(1, 3, figsize=(12, 5), sharey=True, sharex=True)
+        for ax, band in zip(allax, ('g', 'r', 'z')):
+            ax.set_xlabel('RA (deg)')
+            ax.text(0.9, 0.05, band, ha='center', va='bottom',
+                    transform=ax.transAxes, fontsize=18)
+
+            if band == 'g':
+                ax.set_ylabel('Dec (deg)')
+            ax.get_xaxis().get_major_formatter().set_useOffset(False)
+
+            # individual CCDs
+            these = np.where([tim.band == band for tim in tims])[0]
+            col = plt.cm.Set1(np.linspace(0, 1, len(tims)))
+            for ii, indx in enumerate(these):
+                tim = tims[indx]
+                #wcs = tim.subwcs
+                wcs = tim.imobj.get_wcs()
+                cc = wcs.radec_bounds()
+                ax.add_patch(patches.Rectangle((cc[0], cc[2]), cc[1]-cc[0], cc[3]-cc[2],
+                                               fill=False, lw=2, edgecolor=col[these[ii]],
+                                               label='ccd{:02d}'.format(these[ii])))
+            ax.legend(ncol=2, frameon=False, loc='upper left', fontsize=10)
+
+            # output mosaic footprint
+            cc = targetwcs.radec_bounds()
+            ax.add_patch(patches.Rectangle((cc[0], cc[2]), cc[1]-cc[0], cc[3]-cc[2],
+                                           fill=False, lw=2, edgecolor='k'))
+
+            if subsky_radii:
+                racen, deccen = targetwcs.crval
+                for rad in subsky_radii:
+                    ax.add_patch(patches.Circle((racen, deccen), rad / 3600, fill=False, edgecolor='black', lw=2))
+            else:
+                for gal in refs:
+                    ax.add_patch(patches.Circle((gal.ra, gal.dec), gal.radius, fill=False, edgecolor='black', lw=2))
+
+            ax.set_ylim(ylim)
+            ax.set_xlim(xlim)
+            ax.invert_xaxis()
+            ax.set_aspect('equal')
+
+        plt.subplots_adjust(bottom=0.12, wspace=0.05, left=0.12, right=0.97, top=0.95)
+        plt.savefig(os.path.join(survey.output_dir, 'metrics', 'cus', '{}-ccdpos.jpg'.format(ps.basefn)))
+
+    if plots:
         plt.figure(figsize=(8,6))
         mods = []
         for tim in tims:
@@ -173,7 +232,8 @@ def ubercal_skysub(tims, targetwcs, survey, brickname, bands, mp,
     refs, _ = get_reference_sources(survey, targetwcs, targetwcs.pixel_scale(), ['r'],
                                     tycho_stars=True, gaia_stars=True,
                                     large_galaxies=True, star_clusters=True)
-    refmask = get_reference_map(targetwcs, refs) == 0
+    refmask = get_reference_map(targetwcs, refs) == 0 # True=skypix
+    skydict = {'radii': subsky_radii}
 
     allbands = np.array([tim.band for tim in tims])
     for band in sorted(set(allbands)):
@@ -186,7 +246,9 @@ def ubercal_skysub(tims, targetwcs, survey, brickname, bands, mp,
 
         # Derive the ubercal correction and then apply it.
         x = coadds_ubercal(bandtims, coaddtims=[tims[ii] for ii in I],
-                           plots=plots, plots2=plots2, ps=ps)
+                           plots=plots, plots2=plots2, ps=ps, verbose=True)
+        skydict[band] = {'ccds': [tims[ii].name for ii in I], 'delta': x}
+
         # Apply the correction and return the tims
         for jj, (correction, ii) in enumerate(zip(x, I)):
             tims[ii].data += correction
@@ -201,12 +263,34 @@ def ubercal_skysub(tims, targetwcs, survey, brickname, bands, mp,
         #newcorrection = coadds_ubercal(fulltims)
         #print(newcorrection)
 
+    H, W, pixscale = targetwcs.get_height(), targetwcs.get_width(), targetwcs.pixel_scale()
+
     C = make_coadds(tims, bands, targetwcs, callback=None, sbscale=False, mp=mp)
     for coimg,coiv,band in zip(C.coimgs, C.cowimgs, bands):
-        #cosky = np.median(coimg[refmask * (coiv > 0)])
-        skypix = _build_objmask(coimg, coiv, refmask * (coiv>0))
-        skymean, skymedian, skysig = sigma_clipped_stats(coimg, mask=~skypix, sigma=3.0)
-        
+        if subsky_radii:
+            # Estimate the sky background from an annulus surrounding the object
+            # (assumed to be at the center of the mosaic, targetwcs.crval).
+            _, x0, y0 = targetwcs.radec2pixelxy(targetwcs.crval[0], targetwcs.crval[1])
+            xcen, ycen = np.round(x0 - 1).astype('int'), np.round(y0 - 1).astype('int')
+            ymask, xmask = np.ogrid[-ycen:H-ycen, -xcen:W-xcen]
+
+            #cenmask = (xmask**2 + ymask**2) <= (subsky_radii[0] / pixscale)**2 # True=object pixels
+            inmask = (xmask**2 + ymask**2) <= (subsky_radii[1] / pixscale)**2
+            outmask = (xmask**2 + ymask**2) <= (subsky_radii[2] / pixscale)**2
+            skymask = (outmask*1 - inmask*1) == 1 # True=skypix
+
+            # Find and mask objects, then get the sky.
+            skypix = _build_objmask(coimg, coiv, refmask * (coiv>0))
+            skypix = np.logical_and(skypix, skymask)
+            #plt.imshow(skypix, origin='lower') ; plt.savefig('junk.png')
+        else:
+            skypix = refmask * (coiv>0)
+            skypix = _build_objmask(coimg, coiv, skypix)
+
+        skymean, skymedian, skysig = sigma_clipped_stats(coimg, mask=np.logical_not(skypix), sigma=3.0)
+        skydict[band].update({'mean': skymean, 'median': skymedian, 'sigma': skysig,
+                              'npix': np.sum(skypix)})
+
         I = np.where(allbands == band)[0]
         #print('Band', band, 'Coadd sky:', skymedian)
 
@@ -249,7 +333,7 @@ def ubercal_skysub(tims, targetwcs, survey, brickname, bands, mp,
         C = make_coadds(tims, bands, targetwcs, callback=None, mp=mp)
         imsave_jpeg(os.path.join(survey.output_dir, 'metrics', 'cus', '{}-customsky.jpg'.format(ps.basefn)),
                     get_rgb(C.coimgs, bands), origin='lower')
-        
+
     if plots2:
         plt.clf()
         for coimg,band in zip(C.coimgs, bands):
@@ -259,125 +343,7 @@ def ubercal_skysub(tims, targetwcs, survey, brickname, bands, mp,
         plt.title('After adjustment: coadds (sb scaled)')
         ps.savefig()
 
-    return tims
-
-def coadds_skysub(tims, targetwcs, survey, brickname, bands, mp,
-                  subsky_radii=None, plots=False, plots2=False,
-                  ps=None, verbose=False):
-    
-    from tractor.sky import ConstantSky
-    from legacypipe.reference import get_reference_sources, get_reference_map
-    from legacypipe.coadds import make_coadds
-    from legacypipe.survey import get_rgb, imsave_jpeg
-    from astropy.stats import sigma_clipped_stats
-
-    if plots or plots2:
-        import os
-        import matplotlib.pyplot as plt
-        
-    if plots:
-        import matplotlib.patches as patches
-
-        refs, _ = get_reference_sources(survey, targetwcs, targetwcs.pixel_scale(), ['r'],
-                                        tycho_stars=False, gaia_stars=False,
-                                        large_galaxies=True, star_clusters=False)
-        
-        pixscale = targetwcs.pixel_scale()
-        width, height = targetwcs.get_width() * pixscale / 3600, targetwcs.get_height() * pixscale / 3600 # [degrees]
-        bb, bbcc = targetwcs.radec_bounds(), targetwcs.radec_center() # [degrees]
-        pad = 0.5 * width # [degrees]
-
-        delta = np.max( (np.diff(bb[0:2]), np.diff(bb[2:4])) ) / 2 + pad / 2
-        xlim = bbcc[0] - delta, bbcc[0] + delta
-        ylim = bbcc[1] - delta, bbcc[1] + delta
-
-        plt.clf()
-        fig, allax = plt.subplots(1, 3, figsize=(12, 5), sharey=True, sharex=True)
-        for ax, band in zip(allax, ('g', 'r', 'z')):
-            ax.set_xlabel('RA (deg)')
-            ax.text(0.9, 0.05, band, ha='center', va='bottom',
-                    transform=ax.transAxes, fontsize=18)
-
-            if band == 'g':
-                ax.set_ylabel('Dec (deg)')
-            ax.get_xaxis().get_major_formatter().set_useOffset(False)
-            for gal in refs:
-                ax.add_patch(patches.Circle((gal.ra, gal.dec), gal.radius, fill=False, edgecolor='black', lw=2))
-
-            these = np.where([tim.band == band for tim in tims])[0]
-            col = plt.cm.Set1(np.linspace(0, 1, len(tims)))
-            for ii, indx in enumerate(these):
-                tim = tims[indx]
-                wcs = tim.subwcs
-                cc = wcs.radec_bounds()
-                ax.add_patch(patches.Rectangle((cc[0], cc[2]), cc[1]-cc[0],
-                                               cc[3]-cc[2], fill=False, lw=2, 
-                                               edgecolor=col[these[ii]],
-                                               label='ccd{:02d}'.format(these[ii])))
-                ax.legend(ncol=2, frameon=False, loc='upper left', fontsize=10)
-
-            ax.set_ylim(ylim)
-            ax.set_xlim(xlim)
-            ax.invert_xaxis()
-            ax.set_aspect('equal')
-
-        plt.subplots_adjust(bottom=0.12, wspace=0.05, left=0.12, right=0.97, top=0.95)
-        plt.savefig(os.path.join(survey.output_dir, 'metrics', 'cus', '{}-ccdpos.jpg'.format(ps.basefn)))
-        
-    if plots:
-        plt.figure(figsize=(8,6))
-        mods = []
-        for tim in tims:
-            imcopy = tim.getImage().copy()
-            tim.sky.addTo(imcopy, -1)
-            mods.append(imcopy)
-        C = make_coadds(tims, bands, targetwcs, mods=mods, callback=None, mp=mp)
-        imsave_jpeg(os.path.join(survey.output_dir, 'metrics', 'cus', '{}-pipelinesky.jpg'.format(ps.basefn)),
-                    get_rgb(C.comods, bands), origin='lower')
-
-    for tim in tims:
-        # full-field mosaic with no sky-subtraction
-        tim.imobj.get_tractor_image(gaussPsf=True, pixPsf=False, subsky=False,
-                                    dq=True, apodize=False)
-        H, W = tim.subwcs.shape
-        H, W = np.int(H), np.int(W)
-        pixel_scale = tim.subwcs.pixel_scale()
-
-        refs, _ = get_reference_sources(survey, tim.subwcs, pixel_scale, ['r'],
-                                        tycho_stars=True, gaia_stars=True,
-                                        large_galaxies=True, star_clusters=True)
-        refmask = get_reference_map(tim.subwcs, refs) == 0
-    
-        # Mask the center of the (target) field--
-        #http://stackoverflow.com/questions/8647024/how-to-apply-a-disc-shaped-mask-to-a-numpy-array
-        _, x0, y0 = targetwcs.radec2pixelxy(targetwcs.crval[0], targetwcs.crval[1])
-        xcen, ycen = np.round(x0 - 1).astype('int'), np.round(y0 - 1).astype('int')
-        ymask, xmask = np.ogrid[-ycen:H-ycen, -xcen:W-xcen]
-        cenmask = (xmask**2 + ymask**2) <= (subsky_radii[0] / pixel_scale)**2
-        
-    allbands = np.array([tim.band for tim in tims])
-    for band in sorted(set(allbands)):
-        print('Working on band {}'.format(band))
-        I = np.where(allbands == band)[0]
-
-        bandtims = [tims[ii].imobj.get_tractor_image(
-            gaussPsf=True, pixPsf=False, subsky=False, dq=True, apodize=False)
-            for ii in I]
-
-    C = make_coadds(tims, bands, targetwcs, callback=None, sbscale=False, mp=mp)
-    for coimg,coiv,band in zip(C.coimgs, C.cowimgs, bands):
-        #cosky = np.median(coimg[refmask * (coiv > 0)])
-        skypix = _build_objmask(coimg, coiv, refmask * (coiv>0))
-        skymean, skymedian, skysig = sigma_clipped_stats(coimg, mask=~skypix, sigma=3.0)
-        
-        I = np.where(allbands == band)[0]
-        #print('Band', band, 'Coadd sky:', skymedian)
-
-        for ii in I:
-            tims[ii].data -= skymedian
-            #print('Tim', tims[ii], 'after subtracting skymedian: median', np.median(tims[ii].data))
-
-    return tims
+    return tims, skydict
 
 def stage_fit_on_coadds(
         survey=None, targetwcs=None, pixscale=None, bands=None, tims=None,
@@ -395,11 +361,11 @@ def stage_fit_on_coadds(
 
     from legacypipe.coadds import make_coadds
     from legacypipe.bits import DQ_BITS
-    from legacypipe.survey import get_rgb, imsave_jpeg, LegacySurveyWcs
+    from legacypipe.survey import LegacySurveyWcs
     from legacypipe.coadds import get_coadd_headers
 
     from tractor.image import Image
-    from tractor.basics import NanoMaggies, LinearPhotoCal
+    from tractor.basics import LinearPhotoCal
     from tractor.sky import ConstantSky
     from tractor.psf import PixelizedPSF
     from tractor.tractortime import TAITime
@@ -407,25 +373,18 @@ def stage_fit_on_coadds(
     import fitsio
 
     # Custom sky-subtraction for large galaxies.
+    skydict = {}
     if not subsky:
-        plots, plots2, verbose = True, False, True
-        if plots or plots2:
+        if ubercal_sky:
             from astrometry.util.plotutils import PlotSequence
             ps = PlotSequence('fitoncoadds-{}'.format(brickname))
-        if ubercal_sky:
-            tims = ubercal_skysub(tims, targetwcs, survey, brickname, bands, 
-                                  mp, plots=plots, plots2=plots2, ps=ps,
-                                  verbose=verbose)
-        elif subsky_radii is not None:
-            tims = coadds_skysub(tims, targetwcs, survey, brickname, bands,
-                                 mp, plots=plots, plots2=plots2, ps=ps,
-                                 subsky_radii=subsky_radii)
+            tims, skydict = ubercal_skysub(tims, targetwcs, survey, brickname, bands,
+                                           mp, subsky_radii=subsky_radii, plots=True,
+                                           plots2=False, ps=ps, verbose=True)
         else:
             print('Skipping sky-subtraction entirely.')
-            pass
-            
-    # Create coadds and then build custom tims from them.
 
+    # Create coadds and then build custom tims from them.
     for tim in tims:
         ie = tim.inverr
         if np.any(ie < 0):
@@ -433,11 +392,9 @@ def stage_fit_on_coadds(
 
     C = make_coadds(tims, bands, targetwcs,
                     detmaps=True, ngood=True, lanczos=lanczos,
-                    allmasks=True, psf_images=True,
+                    allmasks=True, anymasks=True, psf_images=True,
                     mp=mp, plots=plots2, ps=ps, # note plots2 here!
                     callback=None)
-    #with survey.write_output('image-jpeg', brick=brickname) as out:
-    #    imsave_jpeg(out.fn, get_rgb(C.coimgs, bands), origin='lower')
 
     if plots2:
         import pylab as plt
@@ -479,14 +436,15 @@ def stage_fit_on_coadds(
             # detiv = np.zeros_like(detim) + (1. / detsig1**2)
             # detiv[iv == 0] = 0.
             # detiv = gaussian_filter(detiv, psf_sigma)
-            # 
+            #
             # plt.clf()
             # plt.hist((detim * np.sqrt(detiv)).ravel(), bins=50, range=(-5,8), log=True)
             # plt.title('Coadd detection map values / detie (sigmas): band %s' % band)
             # ps.savefig()
 
     cotims = []
-    for band,img,iv,mask,psfimg in zip(bands, C.coimgs, C.cowimgs, C.allmasks, C.psf_imgs):
+    for band,img,iv,allmask,anymask,psfimg in zip(
+            bands, C.coimgs, C.cowimgs, C.allmasks, C.anymasks, C.psf_imgs):
         mjd = np.mean([tim.imobj.mjdobs for tim in tims if tim.band == band])
         mjd_tai = astropy.time.Time(mjd, format='mjd', scale='utc').tai.mjd
         tai = TAITime(None, mjd=mjd_tai)
@@ -539,7 +497,7 @@ def stage_fit_on_coadds(
             iv = iv * np.sqrt(iv) / np.sqrt(median_iv)
             assert(np.all(np.isfinite(iv)))
             assert(np.all(iv >= 0))
-    
+
         cotim = Image(img, invvar=iv, wcs=twcs, psf=psf,
                       photocal=LinearPhotoCal(1., band=band),
                       sky=ConstantSky(0.), name='coadd-'+band)
@@ -547,17 +505,85 @@ def stage_fit_on_coadds(
         cotim.subwcs = targetwcs
         cotim.psf_sigma = psf_sigma
         cotim.sig1 = 1./np.sqrt(np.median(iv[iv>0]))
+
+        # Often, SATUR masks on galaxies / stars are surrounded by BLEED pixels.  Soak these into
+        # the SATUR mask.
+
+        if plots:
+            import pylab as plt
+
+        from scipy.ndimage.morphology import binary_dilation
+        anymask |= np.logical_and(((anymask & DQ_BITS['bleed']) > 0),
+                                  binary_dilation(((anymask & DQ_BITS['satur']) > 0), iterations=10)) * DQ_BITS['satur']
+
+        # Saturated in any image -> treat as saturated in coadd
+        # (otherwise you get weird systematics in the weighted coadds, and weird source detection!)
+        mask = allmask
+        mask[(anymask & DQ_BITS['satur'] > 0)] |= DQ_BITS['satur']
+
         cotim.dq = mask
         cotim.dq_saturation_bits = DQ_BITS['satur']
         cotim.psfnorm = gnorm
         cotim.galnorm = 1.0 # bogus!
         cotim.imobj = Duck()
         cotim.imobj.fwhm = 2.35 * psf_sigma
+        cotim.imobj.pixscale = pixscale
         cotim.time = tai
         cotim.primhdr = fitsio.FITSHDR()
         get_coadd_headers(cotim.primhdr, tims, band)
 
+        # custom sky-subtraction (implies ubercal_sky)
+        if bool(skydict):
+            nccds = len(np.atleast_1d(skydict[band]['ccds']))
+            if subsky_radii:
+                cotim.primhdr.add_record(dict(name='SKYRAD0', value=np.float32(subsky_radii[0]),
+                                              comment='sky masking radius [arcsec]'))
+                cotim.primhdr.add_record(dict(name='SKYRAD1', value=np.float32(subsky_radii[1]),
+                                              comment='sky inner annulus radius [arcsec]'))
+                cotim.primhdr.add_record(dict(name='SKYRAD2', value=np.float32(subsky_radii[2]),
+                                              comment='sky outer annulus radius [arcsec]'))
+            for ii in np.arange(nccds):
+                cotim.primhdr.add_record(dict(name='SKCCD{}'.format(ii), value=skydict[band]['ccds'][ii],
+                                              comment='ubersky CCD {} name'.format(ii)))
+            for ii in np.arange(nccds):
+                cotim.primhdr.add_record(dict(name='SKCOR{}'.format(ii), value=np.float32(skydict[band]['delta'][ii]),
+                                              comment='ubersky for CCD {} [nanomaggies]'.format(ii)))
+            cotim.primhdr.add_record(dict(name='SKYMEAN{}'.format(band.upper()), value=skydict[band]['mean'],
+                                          comment='mean {} sky background [nanomaggies]'.format(band)))
+            cotim.primhdr.add_record(dict(name='SKYMED{}'.format(band.upper()), value=skydict[band]['median'],
+                                          comment='median {} sky background [nanomaggies]'.format(band)))
+            cotim.primhdr.add_record(dict(name='SKYSIG{}'.format(band.upper()), value=skydict[band]['sigma'],
+                                          comment='sigma {} sky background [nanomaggies]'.format(band)))
+            cotim.primhdr.add_record(dict(name='SKYPIX{}'.format(band.upper()), value=skydict[band]['npix'],
+                                          comment='number of pixels in {} sky background'.format(band)))
+
         cotims.append(cotim)
+
+        if plots:
+            plt.clf()
+            bitmap = dict([(v,k) for k,v in DQ_BITS.items()])
+            k = 1
+            for i in range(12):
+                bitval = 1 << i
+                if not bitval in bitmap:
+                    continue
+                # only 9 bits are actually used
+                plt.subplot(3,3,k)
+                k+=1
+                plt.imshow((cotim.dq & bitval) > 0,
+                           vmin=0, vmax=1.5, cmap='hot', origin='lower')
+                plt.title(bitmap[bitval])
+            plt.suptitle('Coadd mask planes %s band' % band)
+            ps.savefig()
+
+            plt.clf()
+            h,w = cotim.shape
+            rgb = np.zeros((h,w,3), np.uint8)
+            rgb[:,:,0] = (cotim.dq & DQ_BITS['satur'] > 0) * 255
+            rgb[:,:,1] = (cotim.dq & DQ_BITS['bleed'] > 0) * 255
+            plt.imshow(rgb, origin='lower')
+            plt.suptitle('Coadd DQ band %s: red = SATUR, green = BLEED' % band)
+            ps.savefig()
 
         # Save an image of the coadd PSF
 
@@ -584,4 +610,3 @@ def stage_fit_on_coadds(
 
     # EVIL
     return dict(tims=cotims)
-

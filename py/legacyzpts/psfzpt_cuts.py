@@ -1,7 +1,6 @@
 from __future__ import print_function
 import numpy as np
-from astrometry.util.fits import fits_table, merge_tables
-from collections import Counter
+from astrometry.util.fits import fits_table
 
 def psf_cuts_to_string(ccd_cuts, join=', '):
     s = []
@@ -233,9 +232,14 @@ def psf_zeropoint_cuts(P, pixscale,
         ('phrms',     P.phrms > 0.1),
         ('exptime', P.exptime < 30),
         ('seeing_bad', np.logical_not(np.logical_and(seeing > 0, seeing < 3.0))),
-        ('badexp_file', np.array([expnum in bad_expid for expnum in P.expnum])),
+        ('badexp_file', np.array([((expnum, None) in bad_expid or
+                                   (expnum, ccdname0) in bad_expid)
+                                  for expnum, ccdname0 in zip(P.expnum, ccdname)])),
         ('radecrms',  np.hypot(P.ccdrarms, P.ccddecrms) > radec_rms),
-        ('sky_is_bright', np.array([sky > skybright.get(f.strip(), 1e6) for f,sky in zip(P.filter, P.ccdskycounts)])),
+        ('sky_is_bright', np.array([
+            ((sky > skybright.get(f.strip(), 1e6)) |
+             (sky*exptime > 35000))
+            for (f, sky, exptime) in zip(P.filter, P.ccdskycounts, P.exptime)])),
         ('zpt_diff_avg', np.abs(P.ccdzpt - P.zpt) > zpt_diff_avg),
         ('phrms_s7', (P.ccdphrms > 0.1) & (ccdname == 'S7')),
     ]
@@ -335,65 +339,24 @@ def read_bad_expid(fn='bad_expid.txt'):
         if line[0] == '#':
             continue
         words = line.split()
-        if len(words) < 2:
+        if len(words) < 1:
             continue
+        if '-' in words[0]:
+            idparts = words[0].split('-')
+            if len(idparts) != 2:
+                print('Skipping line', line)
+                continue
+            expidstr = idparts[0]
+            ccd = idparts[1].strip()
+        else:
+            expidstr = words[0]
+            ccd = None
         try:
-            expnum = int(words[0], 10)
+            expnum = int(expidstr, 10)
         except ValueError:
             print('Skipping line', line)
             continue
-        reason = ' '.join(words[1:])
-        bad_expid[expnum] = reason
+        reason = words[1:] if len(words) > 1 else 'unknown'
+        reason = ' '.join(reason)
+        bad_expid[(expnum, ccd)] = reason
     return bad_expid
-
-if __name__ == '__main__':
-    import sys
-    from pkg_resources import resource_filename
-    import pylab as plt
-
-    # MzLS, BASS DR8b updates
-    T = fits_table('/global/project/projectdirs/cosmo/work/legacysurvey/dr8b/runbrick-90prime-mosaic/survey-ccds-dr8b-90prime-mosaic-nocuts.kd.fits')
-    print('Cameras:', Counter(T.camera))
-
-    camera = 'mosaic'
-    fn = resource_filename('legacyzpts', 'data/{}-bad_expid.txt'.format(camera))
-    print('Reading', fn)
-    bad_expid = read_bad_expid(fn)
-
-    I, = np.nonzero([cam.strip() == camera for cam in T.camera])
-    Tm = T[I]
-    add_psfzpt_cuts(Tm, camera, bad_expid)
-
-    camera = '90prime'
-    ## NO BAD_EXPID!
-    I, = np.nonzero([cam.strip() == camera for cam in T.camera])
-    Tb = T[I]
-    add_psfzpt_cuts(Tb, camera, [])
-
-    T = merge_tables([Tm, Tb])
-    T.writeto('/tmp/survey-ccds-updated.fits')
-
-    g0 = 25.74
-    r0 = 25.52
-    z0 = 26.20
-    dg = (-0.5, 0.18)
-    dr = (-0.5, 0.18)
-    dz = (-0.8, 0.8)
-    zpt_lo = dict(g=g0+dg[0], r=r0+dr[0], z=z0+dz[0])
-    zpt_hi = dict(g=g0+dg[1], r=r0+dr[1], z=z0+dz[1])
-    for band in ['g','r','z']:
-        I, = np.nonzero([f[0] == band for f in T.filter])
-        detrend = detrend_mzlsbass_zeropoints(T[I])
-        from astrometry.util.plotutils import *
-        plt.clf()
-        plt.subplot(2,1,1)
-        ylo,yhi = zpt_lo[band], zpt_hi[band]
-        ha = dict(doclf=False, docolorbar=False, nbins=200,
-                  range=((T.mjd_obs.min(), T.mjd_obs.max()),
-                         (ylo-0.01, yhi+0.01)))
-        loghist(T.mjd_obs[I], np.clip(T.ccdzpt[I], ylo, yhi), **ha)
-        plt.title('Original zpt %s' % band)
-        plt.subplot(2,1,2)
-        loghist(T.mjd_obs[I], np.clip(detrend, ylo, yhi), **ha)
-        plt.title('Detrended')
-        plt.savefig('detrend-h2-%s.png' % band)
