@@ -60,7 +60,8 @@ def main():
                     raise
 
             # ADM limit to just PRIMARY objects from imaging.
-            bp = objects["BRICK_PRIMARY"]
+            #bp = objects["BRICK_PRIMARY"]
+            bp = objects["TYPE"] != 'DUP'
             objects = objects[bp]
             pos = radec2pos(objects['RA'], objects['DEC'])
 

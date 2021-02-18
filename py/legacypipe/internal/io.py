@@ -45,8 +45,10 @@ def parse_filename(filename):
     returns brickname if it is, otherwise raises ValueError"""
     if not filename.endswith('.fits'): raise ValueError
     #- match filename tractor-0003p027.fits -> brickname 0003p027
-    match = re.search('tractor-(\d{4}[pm]\d{3})\.fits', 
+    match = re.search('sweep-(\d{3}[pm]\d{3})-(\d{3}[pm]\d{3})\.fits', 
             os.path.basename(filename))
+    #match = re.search('tractor-(\d{4}[pm]\d{3})\.fits', 
+    #        os.path.basename(filename))
 
     if not match: raise ValueError
 
